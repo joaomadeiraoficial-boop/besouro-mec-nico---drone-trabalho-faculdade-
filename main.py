@@ -1,6 +1,7 @@
-from math import pi, sin
+﻿from math import pi, sin, cos
 from pathlib import Path
 import argparse
+import random
 
 import numpy as np
 
@@ -59,6 +60,10 @@ class Battlefield(Base):
                 "fire": (1.0, 0.59, 0.12),
             }.items()
         }
+        self.beetle_scale = 0.65
+        self.exploded = False
+        self.beetle_debris = []
+        self.beetle_main_parts = []
         self.build_environment()
         self.build_beetle()
         self.build_drone()
@@ -142,6 +147,9 @@ class Battlefield(Base):
                 self.part(knee, (.055, -.24, side * .08), (.08, .29, .085), "alloy")
                 self.part(knee, (.06, -.41, 0), (.24, .10, .16), "steel")
                 self.legs.append((pivot, index + (side > 0)))
+        # tamanho reduzido
+        self.beetle.scale(self.beetle_scale)
+        self.beetle_main_parts = list(self.beetle.children)
 
     def build_drone(self):
         self.drone = self.node(self.scene, (0, 0, 0))
@@ -157,39 +165,115 @@ class Battlefield(Base):
                 self.part(rotor, (0, 0, 0), (.85, .055, .10), "steel")
                 self.rotors.append((rotor, x * z))
 
+    def _trigger_beetle_explosion(self):
+        if self.exploded:
+            return
+        self.exploded = True
+        origin = np.array(self.beetle.getWorldPosition(), dtype=np.float32)
+        parts = list(self.beetle_main_parts)
+        for i, part in enumerate(parts):
+            try:
+                world = part.getWorldMatrix().copy()
+            except Exception:
+                continue
+            try:
+                if part.parent is not None:
+                    part.parent.remove(part)
+            except Exception:
+                pass
+            part.transform = world
+            self.scene.add(part)
+            ang = (i / max(1, len(parts))) * 2 * pi + i * 0.8
+            vel = np.array([
+                -8.5 - 2.0 * (i % 4) + 1.0 * cos(ang),
+                4.2 + 1.8 * ((i % 5) * 0.25) + 0.7 * abs(sin(ang)),
+                -1.8 + 2.8 * sin(ang)
+            ], dtype=np.float32)
+            avel = np.array([
+                (-1) ** i * (3.5 + i * 0.45),
+                2.5 + (i % 5) * 0.6,
+                (-1) ** (i + 1) * (3.0 + i * 0.35)
+            ], dtype=np.float32)
+            self.beetle_debris.append({"obj": part, "vel": vel, "avel": avel, "rest": 0.28})
+        # alguns fragmentos extras
+        for j in range(10):
+            frag = self.part(self.scene, origin.copy(), (0.08 + 0.03*(j%3), 0.05 + 0.02*(j%2), 0.10 + 0.04*((j+1)%3)),
+                             random.choice(["steel", "dark", "alloy", "beetle"]))
+            frag.setPosition((origin[0] + random.uniform(-0.15, 0.15), origin[1] + random.uniform(0.1, 0.4), origin[2] + random.uniform(-0.15, 0.15)))
+            ang = j * 0.75
+            vel = np.array([
+                -7.0 - random.uniform(0, 4.0) + 1.2 * cos(ang),
+                3.0 + random.uniform(0, 3.5),
+                random.uniform(-3.0, 3.0)
+            ], dtype=np.float32)
+            avel = np.array([random.uniform(-7, 7), random.uniform(-7, 7), random.uniform(-7, 7)], dtype=np.float32)
+            self.beetle_debris.append({"obj": frag, "vel": vel, "avel": avel, "rest": 0.22})
+        self.beetle.visible = False
+
+    def _update_debris(self, dt):
+        g = -19.5
+        dt = max(0.0, min(dt, 0.05))
+        for d in self.beetle_debris:
+            obj = d["obj"]
+            vel = d["vel"]
+            avel = d["avel"]
+            pos = obj.transform[:3, 3].copy()
+            vel[1] += g * dt
+            pos += vel * dt
+            if pos[1] < 0.03:
+                pos[1] = 0.03
+                if vel[1] < 0:
+                    vel[1] = -vel[1] * d.get("rest", 0.25)
+                    vel[0] *= 0.78
+                    vel[2] *= 0.78
+                    avel *= 0.55
+                if abs(vel[1]) < 0.3:
+                    vel[1] = 0.0
+                vel[0] *= 0.985
+                vel[2] *= 0.985
+            obj.transform[:3, 3] = pos
+            rx = Matrix.makeRotationX(avel[0] * dt)
+            ry = Matrix.makeRotationY(avel[1] * dt)
+            rz = Matrix.makeRotationZ(avel[2] * dt)
+            rot = (rx @ ry @ rz)[:3, :3]
+            obj.transform[:3, :3] = rot @ obj.transform[:3, :3]
+            avel *= (0.996 if pos[1] > 0.04 else 0.982)
+            d["vel"] = vel
+            d["avel"] = avel
+
     def animate(self):
         t = self.time
         dodge = smooth(progress(t, CLEAR_PATH_START, CLEAR_PATH_END))
         scan = smooth(progress(t, 2.5, 3.3)) * (1 - smooth(progress(t, 3.6, 4.2)))
-        flight = progress(t, EXPLOSION, LANDING)
-        bounce = progress(t, LANDING, SETTLE)
-        # O impulso começa com o clarão. O deslocamento para trás diminui até o pouso.
-        launch_distance = 1.48 * (1 - (1 - flight) ** 2) + .14 * bounce
-        beetle_x = -2.4 + .56 * min(t, EXPLOSION) - launch_distance
-        beetle_height = 6.4 * flight * (1 - flight) + .76 * bounce * (1 - bounce)
-        self.beetle.setPosition((beetle_x, beetle_height, .72 * dodge))
-        # Gira quando já está longe do chão e volta com as patas para baixo.
-        tumble = smooth(progress(flight, .12, .86))
-        pitch = 2 * pi * tumble - .10 * sin(pi * bounce)
-        turn = .24 * scan - .37 * sin(pi * dodge)
-        self.beetle.transform[:3, :3] = (
-            Matrix.makeRotationY(turn) @ Matrix.makeRotationZ(pitch)
-        )[:3, :3]
-        for leg, phase in self.legs:
-            stride = 1 - progress(t, 7.8, EXPLOSION)
-            angle = .40 * sin(9 * t + phase * pi) * stride
-            leg.transform[:3, :3] = (
-                Matrix.makeRotationY(angle) @ Matrix.makeRotationZ(.21 * abs(angle / .4))
-            )[:3, :3]
-        for antenna, side in self.antennas:
-            antenna.transform[:3, :3] = (
-                Matrix.makeRotationY(.32 * scan + .13 * sin(5 * t + side))
-                @ Matrix.makeRotationX(side * (.24 + .28 * sin(6 * t + side)))
-            )[:3, :3]
+
+        if t >= EXPLOSION and not self.exploded:
+            self._trigger_beetle_explosion()
+
+        if not self.exploded:
+            # comportamento original antes da explosão (sem arremesso/cambalhota do corpo inteiro)
+            beetle_x = -2.4 + .56 * min(t, EXPLOSION)
+            self.beetle.setPosition((beetle_x, 0.0, .72 * dodge))
+            turn = .24 * scan - .37 * sin(pi * dodge)
+            s = getattr(self, 'beetle_scale', 1.0)
+            self.beetle.transform[:3, :3] = (Matrix.makeRotationY(turn) @ Matrix.makeRotationZ(0.0))[:3, :3] * s
+            for leg, phase in self.legs:
+                stride = 1 - progress(t, 7.8, EXPLOSION)
+                angle = .40 * sin(9 * t + phase * pi) * stride
+                leg.transform[:3, :3] = (
+                    Matrix.makeRotationY(angle) @ Matrix.makeRotationZ(.21 * abs(angle / .4))
+                )[:3, :3]
+            for antenna, side in self.antennas:
+                antenna.transform[:3, :3] = (
+                    Matrix.makeRotationY(.32 * scan + .13 * sin(5 * t + side))
+                    @ Matrix.makeRotationX(side * (.24 + .28 * sin(6 * t + side)))
+                )[:3, :3]
+        else:
+            self._update_debris(getattr(self, 'deltaTime', 1/60))
 
         approach = smooth(progress(t, .2, 3.0))
         pass_by = smooth(progress(t, CLEAR_PATH_END, EXPLOSION))
-        drone_x = beetle_x - 5.8 + 4.85 * approach + 10.5 * pass_by
+        ref_x = (-2.4 + .56 * min(t, EXPLOSION)) if not self.exploded else (-2.4 + .56 * EXPLOSION)
+        drone_x = ref_x - 5.8 + 4.85 * approach + 10.5 * pass_by
         self.drone.setPosition((drone_x, 1.92 + .10 * sin(3 * t) + .27 * pass_by, -1.25))
         for rotor, direction in self.rotors:
             rotor.transform[:3, :3] = Matrix.makeRotationY(direction * 26 * t)[:3, :3]
@@ -203,6 +287,30 @@ class Battlefield(Base):
         size = .25 + 1.9 * sin(pi * blast)
         self.flash.transform[:3, :3] = Matrix.makeRotationZ(blast * 1.3)[:3, :3] * size
 
+    def _reset_sequence(self):
+        # limpa destroços e reconstrói para reiniciar animação
+        for d in getattr(self, 'beetle_debris', []):
+            obj = d.get('obj')
+            if obj and obj.parent is not None:
+                try:
+                    obj.parent.remove(obj)
+                except Exception:
+                    pass
+        self.beetle_debris = []
+        self.exploded = False
+        for obj_name in ('beetle', 'drone', 'flash'):
+            obj = getattr(self, obj_name, None)
+            if obj and obj.parent is not None:
+                try:
+                    obj.parent.remove(obj)
+                except Exception:
+                    pass
+        self.build_beetle()
+        self.build_drone()
+        self.flash = self.part(self.scene, (7, 2, -2), (1, 1, 1), "fire")
+        self.time = 0.0
+        self.animate()
+
     def update(self):
         dt = self.deltaTime
         keys = {key for key in ("space", "r", "c") if self.isKeyPressed(key)}
@@ -211,7 +319,7 @@ class Battlefield(Base):
         if "space" in pressed:
             self.paused = not self.paused
         if "r" in pressed:
-            self.time = 0.0
+            self._reset_sequence()
         if "c" in pressed:
             self.pitch, self.yaw = .105, 0
         self.yaw += .8 * dt * (self.isKeyPressed("left") - self.isKeyPressed("right"))
