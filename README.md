@@ -39,14 +39,19 @@ O modo alternativo renderiza a cena em OpenGL numa janela oculta e copia o quadr
 
 | Tecla | Ação |
 |---|---|
-| Espaço | Pausar ou retomar a animação |
-| Setas | Alterar a orientação da câmera, inclusive em pausa |
-| C | Voltar ao enquadramento baixo inicial |
+| Espaço | Pausar ou retomar a animação (a visualização continua) |
+| Z | Voltar o vídeo/tempo da animação (rewind), mesmo em pausa |
+| X | Avançar o vídeo/tempo da animação, mesmo em pausa |
+| Setas | Alterar a orientação da câmera (perspectiva), inclusive em pausa |
+| W / S | Mover a câmera para frente / para trás |
+| A / D | Mover a câmera para a esquerda / para a direita |
+| Q / E | Mover a câmera para baixo / para cima |
+| C | Voltar ao enquadramento inicial (posição e orientação) |
 | R | Reiniciar o tempo da sequência |
 | S | Salvar captura em capturas/resultado.png |
 | Esc | Sair |
 
-A sequência dura 11 segundos e para na pose final. Use R para rever.
+A sequência dura 11 segundos e para na pose final. Use R para rever. É possível voltar e avançar o tempo da animação (Z/X). A câmera é em perspectiva e pode ser controlada pelo teclado mesmo com a animação pausada, sem interromper a visualização da cena.
 
 ## 3. O que acontece na cena
 
