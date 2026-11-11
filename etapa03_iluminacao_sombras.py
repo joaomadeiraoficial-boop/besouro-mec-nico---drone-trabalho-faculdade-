@@ -1,3 +1,4 @@
+"""3/3 - Iluminação e sombras (shadow mapping)."""
 from pathlib import Path
 
 import numpy as np
@@ -8,10 +9,11 @@ from core.mesh import Mesh
 from core.renderer import Renderer
 from material.material import Material
 
-SHADERS = Path(__file__).parent / "shaders"
+SHADERS = Path(__file__).parent / "shaders"  # pasta dos shaders GLSL
 
 
 def shader_material(name):
+    # Carrega e cria material a partir dos shaders .vert/.frag
     return Material(
         (SHADERS / f"{name}.vert").read_text(),
         (SHADERS / f"{name}.frag").read_text(),
@@ -19,7 +21,7 @@ def shader_material(name):
 
 
 def add_face_normals(geometry):
-    """Calcula a normal de cada triângulo pela ordem dos vértices."""
+    """Calcula normais por face (usadas na iluminação)."""
     triangles = np.asarray(geometry.attributes["vertexPosition"].data, dtype=np.float32).reshape(-1, 3, 3)
     normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
     normals /= np.linalg.norm(normals, axis=1, keepdims=True)
@@ -28,15 +30,16 @@ def add_face_normals(geometry):
 
 
 class ShadowRenderer(Renderer):
-    SIZE = 1024
+    SIZE = 1024  # resolução do mapa de sombra
 
     def __init__(self, screen_size):
         super().__init__([0.43, 0.51, 0.58])
         self.screen_size = screen_size
+        # Direção da luz (luz direcional)
         direction = np.array([-5.0, 9.0, 5.0])
         self.to_light = direction / np.linalg.norm(direction)
 
-        # Câmera da luz. A projeção ortográfica mantém os raios paralelos.
+        # Matriz da "câmera da luz" (projeção ortográfica)
         right = np.cross([0, 1, 0], self.to_light)
         right /= np.linalg.norm(right)
         up = np.cross(self.to_light, right)
@@ -47,6 +50,7 @@ class ShadowRenderer(Renderer):
         ortho[2, 3] = -1
         self.light_matrix = ortho @ np.linalg.inv(light_pose)
 
+        # Textura/framebuffer para o mapa de profundidade (sombra)
         self.depth_texture = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, self.depth_texture)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, self.SIZE, self.SIZE,
@@ -66,12 +70,14 @@ class ShadowRenderer(Renderer):
             raise RuntimeError("Falha ao configurar o mapa de sombras.")
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
+        # Material do passe de profundidade (1º passe)
         self.depth_material = shader_material("depth")
         self.depth_material.addUniform("mat4", "lightMatrix", self.light_matrix)
         self.depth_material.locateUniforms()
         self.depth_vaos = {}
 
     def material(self, texture, color, repeat=(1, 1)):
+        # Material da cena (textura/cor/luz/sombra) para o 2º passe
         material = shader_material("scene")
         material.addUniform("mat4", "lightMatrix", self.light_matrix)
         material.addUniform("vec3", "toLight", self.to_light)
@@ -84,7 +90,7 @@ class ShadowRenderer(Renderer):
         return material
 
     def render(self, scene, camera):
-        # Primeiro passe: grava a profundidade vista pela luz.
+        # 1º passe: desenha profundidade a partir da luz (gera mapa de sombra)
         glBindFramebuffer(GL_FRAMEBUFFER, self.framebuffer)
         glViewport(0, 0, self.SIZE, self.SIZE)
         glClear(GL_DEPTH_BUFFER_BIT)
@@ -105,7 +111,7 @@ class ShadowRenderer(Renderer):
             depth.uniforms["modelMatrix"].uploadData()
             glDrawArrays(GL_TRIANGLES, 0, geometry.vertexCount)
 
-        # Segundo passe: o Renderer da aula desenha da câmera do usuário.
+        # 2º passe: desenha a cena pela câmera (aplica luz e sombra)
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
         glViewport(0, 0, *self.screen_size)
         super().render(scene, camera)

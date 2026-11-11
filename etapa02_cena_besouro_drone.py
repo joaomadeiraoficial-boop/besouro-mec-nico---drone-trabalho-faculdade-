@@ -1,29 +1,16 @@
-﻿"""
-CENA_BESOURO_DRONE.PY
-=====================
-Arquivo principal da animação 3D: "Besouro mecânico e drone em campo de batalha".
-
-VISÃO GERAL (explicação rápida):
-- Monta a cena, cria personagens (besouro e drone), define cenário, controla a
-  animação pelo tempo, lê teclado e renderiza com câmera em perspectiva, luz e sombras.
-- Base do projeto: Pygame (janela/tempo/teclado), PyOpenGL (desenho), NumPy (matrizes).
-
-ROTEIRO (≈ 11 s): besouro caminha e desvia; drone se aproxima, acompanha e ultrapassa;
-em 8 s há explosão (clarão) e o besouro se desmonta, com peças lançadas e caindo.
-
-CONTROLES: Espaço pausa/retoma (visualização continua), Z/X volta-avança o tempo,
-Setas orientam câmera, W/A/S/D movem (frente/esquerda/trás/direita), Q/E sobem/descem,
-C enquadra, R reinicia, S captura, Esc sai.
-"""
+﻿"""2/3 - Cena: monta objetos, anima, controla e renderiza."""
 
 from math import pi, sin, cos
 from pathlib import Path
 import argparse
 import random
+import wave
+import io
 
 import numpy as np
+import pygame
 
-# Núcleo do "motor" gráfico (cena, câmera, objetos, matrizes, malhas, texturas)
+# Base do motor gráfico (cena, câmera, objetos, matrizes, malhas, texturas)
 from core.base import Base
 from core.camera import Camera
 from core.matrix import Matrix
@@ -31,15 +18,16 @@ from core.mesh import Mesh
 from core.object3D import Object3D
 from core.scene import Scene
 from core.texture import Texture
-# Geometrias básicas usadas para montar os modelos
+# Geometrias para montar os modelos
 from geometry.boxGeometry import BoxGeometry
 from geometry.octagonalPrism import OctagonalPrism
 from geometry.rectangleGeometry import RectangleGeometry
-# Renderização com iluminação e sombras
+# Iluminação e sombras
 from lighting import ShadowRenderer, add_face_normals
 
-IMAGES = Path(__file__).parent / "images"  # pasta de texturas/imagens
-# Marcadores de tempo do roteiro (em segundos)
+IMAGES = Path(__file__).parent / "images"  # texturas
+
+# Tempos das fases da animação (em segundos)
 CLEAR_PATH_START = 4.0
 CLEAR_PATH_END = 5.8
 EXPLOSION = 8.0
@@ -48,20 +36,58 @@ SETTLE = 9.60
 DURATION = 11.0
 
 
-# Converte um intervalo de tempo em progresso 0..1
 def progress(time, start, end):
+    # Converte intervalo de tempo em progresso 0..1
     return max(0.0, min(1.0, (time - start) / (end - start)))
 
 
-# Suavização (ease in-out) para transições mais naturais
 def smooth(value):
+    # Suaviza transições (ease in-out)
     return value * value * (3 - 2 * value)
 
 
-# Classe principal: inicializa, monta cena, anima, controla teclado e renderiza
+# Classe principal da cena (montagem, animação e controle)
 class Battlefield(Base):
+    def _make_sound(self, samples, sample_rate=44100):
+        # Cria som (mono 16-bit) a partir de amostras numpy
+        data = np.clip(samples, -1.0, 1.0)
+        pcm = (data * 32767).astype(np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm.tobytes())
+        buf.seek(0)
+        return pygame.mixer.Sound(buffer=buf.read())
+
+    def _init_audio(self):
+        # Inicializa áudio e gera sons simples (explosão e passo)
+        self.audio_ok = False
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
+            sr = 44100
+            # Explosão: ruído com decaimento
+            t = np.linspace(0, 0.8, int(sr * 0.8), False)
+            noise = np.random.uniform(-1, 1, t.size)
+            env = np.exp(-4.5 * t)
+            boom = (noise * env * 0.7 + 0.25 * np.sin(2 * np.pi * 70 * t) * np.exp(-6 * t))
+            self.explosion_sound = self._make_sound(boom, sr)
+            self.explosion_sound.set_volume(0.6)
+            # Passo: impacto curto
+            t = np.linspace(0, 0.09, int(sr * 0.09), False)
+            env = np.exp(-45 * t)
+            step = (0.6 * np.sin(2 * np.pi * 95 * t) + 0.25 * np.random.uniform(-1, 1, t.size)) * env
+            self.step_sound = self._make_sound(step, sr)
+            self.step_sound.set_volume(0.22)
+            self.audio_ok = True
+        except Exception:
+            self.explosion_sound = None
+            self.step_sound = None
+
     def initialize(self):
-        """Prepara renderizador, cena, câmera em perspectiva, materiais e estado inicial."""
+        """Inicializa renderizador, cena, câmera, materiais, objetos e áudio."""
         self.renderer = ShadowRenderer(self.screenSize)  # desenha cena com luz/sombras
         self.scene = Scene()  # grafo/contêiner de objetos 3D
         self.camera = Camera(angleOfView=51, aspectRatio=self.screenSize[0] / self.screenSize[1])  # câmera perspectiva
@@ -96,6 +122,8 @@ class Battlefield(Base):
         self.exploded = False
         self.beetle_debris = []
         self.beetle_main_parts = []
+        self._init_audio()
+        self._step_cooldown = 0.0
         self.build_environment()
         self.build_beetle()
         self.build_drone()
@@ -116,6 +144,7 @@ class Battlefield(Base):
         return mesh
 
     def build_environment(self):
+        # Monta cenário (chão texturizado e obstáculos)
         earth = Texture(IMAGES / "terra.png")
         floor = Mesh(add_face_normals(RectangleGeometry(54, 48)),
                      self.renderer.material(earth, (1, 1, 1), (19, 17)))
@@ -127,6 +156,7 @@ class Battlefield(Base):
             wall.rotateY(.12)
 
     def build_beetle(self):
+        # Monta o besouro (hierarquia de partes)
         self.beetle = self.node(self.scene, (0, 0, 0))
         self.part(self.beetle, (-.17, .67, 0), (1.47, .43, .94), "dark")
         # Duas placas facetadas com uma abertura ao centro, como os élitros.
@@ -184,6 +214,7 @@ class Battlefield(Base):
         self.beetle_main_parts = list(self.beetle.children)
 
     def build_drone(self):
+        # Monta o drone (corpo e rotores)
         self.drone = self.node(self.scene, (0, 0, 0))
         self.part(self.drone, (0, 0, 0), (.75, .24, .61), "drone")
         self.part(self.drone, (.30, -.13, 0), (.28, .21, .23), "eye")
@@ -198,9 +229,12 @@ class Battlefield(Base):
                 self.rotors.append((rotor, x * z))
 
     def _trigger_beetle_explosion(self):
+        # Dispara explosão: separa peças do besouro e cria destroços
         if self.exploded:
             return
         self.exploded = True
+        if getattr(self, 'audio_ok', False) and self.explosion_sound:
+            self.explosion_sound.play()
         origin = np.array(self.beetle.getWorldPosition(), dtype=np.float32)
         parts = list(self.beetle_main_parts)
         for i, part in enumerate(parts):
@@ -243,6 +277,7 @@ class Battlefield(Base):
         self.beetle.visible = False
 
     def _update_debris(self, dt):
+        # Atualiza física simples dos destroços (gravidade/colisão/quique)
         g = -19.5
         dt = max(0.0, min(dt, 0.05))
         for d in self.beetle_debris:
@@ -274,13 +309,16 @@ class Battlefield(Base):
             d["avel"] = avel
 
     def animate(self):
+        # Animação por tempo (fases do roteiro)
         t = self.time
         dodge = smooth(progress(t, CLEAR_PATH_START, CLEAR_PATH_END))
         scan = smooth(progress(t, 2.5, 3.3)) * (1 - smooth(progress(t, 3.6, 4.2)))
 
+        # Explosão no tempo definido
         if t >= EXPLOSION and not self.exploded:
             self._trigger_beetle_explosion()
 
+        # Movimento do besouro antes da explosão
         if not self.exploded:
             # comportamento original antes da explosão (sem arremesso/cambalhota do corpo inteiro)
             beetle_x = -2.4 + .56 * min(t, EXPLOSION)
@@ -300,10 +338,11 @@ class Battlefield(Base):
                     @ Matrix.makeRotationX(side * (.24 + .28 * sin(6 * t + side)))
                 )[:3, :3]
         else:
-            # com animação pausada, os destroços também permanecem congelados (visualização continua)
+            # Após explosão: atualiza destroços (se não estiver pausado)
             if not getattr(self, 'paused', False):
                 self._update_debris(getattr(self, 'deltaTime', 1/60))
 
+        # Movimento do drone e giro das hélices
         approach = smooth(progress(t, .2, 3.0))
         pass_by = smooth(progress(t, CLEAR_PATH_END, EXPLOSION))
         ref_x = (-2.4 + .56 * min(t, EXPLOSION)) if not self.exploded else (-2.4 + .56 * EXPLOSION)
@@ -314,7 +353,8 @@ class Battlefield(Base):
         for item in self.drone.getDescendantList():
             if isinstance(item, Mesh):
                 item.visible = t < EXPLOSION
-        # O clarão começa na borda direita e entra brevemente no enquadramento.
+
+        # Efeito do clarão da explosão
         blast = progress(t, EXPLOSION, 8.55)
         self.flash.visible = EXPLOSION <= t < 8.55
         self.flash.setPosition((6.35, 1.9 + blast * .5, -.55))
@@ -345,6 +385,7 @@ class Battlefield(Base):
         self._clear_dynamic()
         if hasattr(self, 'rng'):
             self.rng.seed(12345)
+        self._step_cooldown = 0.0
         self.build_beetle()
         self.build_drone()
         self.flash = self.part(self.scene, (7, 2, -2), (1, 1, 1), "fire")
@@ -361,6 +402,7 @@ class Battlefield(Base):
                 self._clear_dynamic()
                 if hasattr(self, 'rng'):
                     self.rng.seed(12345)
+                self._step_cooldown = 0.0
                 self.build_beetle()
                 self.build_drone()
                 self.flash = self.part(self.scene, (7, 2, -2), (1, 1, 1), "fire")
@@ -377,6 +419,7 @@ class Battlefield(Base):
             self._clear_dynamic()
             if hasattr(self, 'rng'):
                 self.rng.seed(12345)
+            self._step_cooldown = 0.0
             self.build_beetle()
             self.build_drone()
             self.flash = self.part(self.scene, (7, 2, -2), (1, 1, 1), "fire")
@@ -394,7 +437,9 @@ class Battlefield(Base):
         self.animate()
 
     def update(self):
+        # Loop por quadro: entrada, tempo, animação e renderização
         dt = self.deltaTime
+        # Teclas de ação (pausa, reinício, enquadrar)
         keys = {key for key in ("space", "r", "c") if self.isKeyPressed(key)}
         pressed = keys - self.previous_keys
         self.previous_keys = keys
@@ -404,12 +449,11 @@ class Battlefield(Base):
             self._reset_sequence()
         if "c" in pressed:
             self.cam_pos, self.pitch, self.yaw = self.cam_home[0].copy(), self.cam_home[1], self.cam_home[2]
-        # Orientação da câmera (setas) - funciona mesmo com animação pausada
+        # Controle da câmera (rotação e movimento)
         self.yaw += .8 * dt * (self.isKeyPressed("left") - self.isKeyPressed("right"))
         self.pitch += .8 * dt * (self.isKeyPressed("up") - self.isKeyPressed("down"))
         self.pitch = max(-1.2, min(1.2, self.pitch))
 
-        # Posição da câmera: W frente, S trás, A esquerda, D direita, Q/E descer/subir
         move_speed = 2.2 * dt
         forward = np.array([sin(self.yaw), 0.0, -cos(self.yaw)], dtype=np.float32)
         right = np.array([cos(self.yaw), 0.0, sin(self.yaw)], dtype=np.float32)
@@ -433,7 +477,7 @@ class Battlefield(Base):
             @ Matrix.makeRotationX(self.pitch)
         )
 
-        # Controle do tempo: Z volta o vídeo, X avança; reprodução normal quando não pausado
+        # Controle do tempo (Z volta, X avança, ou roda normalmente)
         scrub_speed = 3.0  # segundos de vídeo por segundo
         if self.isKeyPressed("z"):
             self._set_time(self.time - scrub_speed * dt)
@@ -441,9 +485,16 @@ class Battlefield(Base):
             self._set_time(self.time + scrub_speed * dt)
         elif not self.paused:
             self._set_time(self.time + dt)
+            # Passos simples do besouro (enquanto caminha)
+            if getattr(self, 'audio_ok', False) and self.step_sound and not self.exploded and self.time < 7.8:
+                self._step_cooldown -= dt
+                if self._step_cooldown <= 0.0:
+                    self.step_sound.play()
+                    self._step_cooldown = 0.32
         else:
             self.animate()
 
+        # Renderiza a cena
         self.renderer.render(self.scene, self.camera)
 
 
