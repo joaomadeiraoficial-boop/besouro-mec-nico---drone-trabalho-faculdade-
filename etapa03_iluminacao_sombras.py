@@ -30,7 +30,7 @@ def add_face_normals(geometry):
 
 
 class ShadowRenderer(Renderer):
-    SIZE = 1024  # resolução do mapa de sombra
+    SIZE = 512  # resolução do mapa de sombra (menor custo)
 
     def __init__(self, screen_size):
         super().__init__([0.43, 0.51, 0.58])

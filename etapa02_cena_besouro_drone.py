@@ -122,12 +122,15 @@ class Battlefield(Base):
         self.exploded = False
         self.beetle_debris = []
         self.beetle_main_parts = []
+        self.explosion_pos = None
+        self.crater = None
         self._init_audio()
         self._step_cooldown = 0.0
         self.build_environment()
         self.build_beetle()
         self.build_drone()
         self.flash = self.part(self.scene, (7, 2, -2), (1, 1, 1), "fire")
+        self.flash.casts_shadow = False
         self.animate()
 
     def node(self, parent, position):
@@ -233,6 +236,16 @@ class Battlefield(Base):
         if self.exploded:
             return
         self.exploded = True
+        # Posição da explosão (a partir do drone)
+        try:
+            self.explosion_pos = np.array(self.drone.getWorldPosition(), dtype=np.float32)
+        except Exception:
+            self.explosion_pos = np.array([4.0, 2.0, -1.25], dtype=np.float32)
+        # Cratera simples no chão
+        if getattr(self, 'crater', None) is None:
+            self.crater = self.part(self.scene, (float(self.explosion_pos[0]), 0.02, float(self.explosion_pos[2])),
+                                    (1.8, 0.03, 1.3), "dark")
+            self.crater.casts_shadow = False
         if getattr(self, 'audio_ok', False) and self.explosion_sound:
             self.explosion_sound.play()
         origin = np.array(self.beetle.getWorldPosition(), dtype=np.float32)
@@ -248,6 +261,7 @@ class Battlefield(Base):
             except Exception:
                 pass
             part.transform = world
+            part.casts_shadow = False  # melhora desempenho na explosão
             self.scene.add(part)
             ang = (i / max(1, len(parts))) * 2 * pi + i * 0.8
             vel = np.array([
@@ -260,12 +274,13 @@ class Battlefield(Base):
                 2.5 + (i % 5) * 0.6,
                 (-1) ** (i + 1) * (3.0 + i * 0.35)
             ], dtype=np.float32)
-            self.beetle_debris.append({"obj": part, "vel": vel, "avel": avel, "rest": 0.28})
+            self.beetle_debris.append({"obj": part, "vel": vel, "avel": avel, "rest": 0.28, "settled": False})
         # alguns fragmentos extras
-        for j in range(10):
+        for j in range(6):
             frag = self.part(self.scene, origin.copy(), (0.08 + 0.03*(j%3), 0.05 + 0.02*(j%2), 0.10 + 0.04*((j+1)%3)),
                              self.rng.choice(["steel", "dark", "alloy", "beetle"]))
             frag.setPosition((origin[0] + self.rng.uniform(-0.15, 0.15), origin[1] + self.rng.uniform(0.1, 0.4), origin[2] + self.rng.uniform(-0.15, 0.15)))
+            frag.casts_shadow = False  # melhora desempenho na explosão
             ang = j * 0.75
             vel = np.array([
                 -7.0 - self.rng.uniform(0, 4.0) + 1.2 * cos(ang),
@@ -273,7 +288,7 @@ class Battlefield(Base):
                 self.rng.uniform(-3.0, 3.0)
             ], dtype=np.float32)
             avel = np.array([self.rng.uniform(-7, 7), self.rng.uniform(-7, 7), self.rng.uniform(-7, 7)], dtype=np.float32)
-            self.beetle_debris.append({"obj": frag, "vel": vel, "avel": avel, "rest": 0.22})
+            self.beetle_debris.append({"obj": frag, "vel": vel, "avel": avel, "rest": 0.22, "settled": False})
         self.beetle.visible = False
 
     def _update_debris(self, dt):
@@ -281,6 +296,8 @@ class Battlefield(Base):
         g = -19.5
         dt = max(0.0, min(dt, 0.05))
         for d in self.beetle_debris:
+            if d.get("settled"):
+                continue
             obj = d["obj"]
             vel = d["vel"]
             avel = d["avel"]
@@ -298,13 +315,18 @@ class Battlefield(Base):
                     vel[1] = 0.0
                 vel[0] *= 0.985
                 vel[2] *= 0.985
+                if abs(vel[0]) + abs(vel[2]) < 0.08 and np.linalg.norm(avel) < 0.25:
+                    vel[:] = 0.0
+                    avel[:] = 0.0
+                    d["settled"] = True
             obj.transform[:3, 3] = pos
-            rx = Matrix.makeRotationX(avel[0] * dt)
-            ry = Matrix.makeRotationY(avel[1] * dt)
-            rz = Matrix.makeRotationZ(avel[2] * dt)
-            rot = (rx @ ry @ rz)[:3, :3]
-            obj.transform[:3, :3] = rot @ obj.transform[:3, :3]
-            avel *= (0.996 if pos[1] > 0.04 else 0.982)
+            if not d.get("settled"):
+                rx = Matrix.makeRotationX(avel[0] * dt)
+                ry = Matrix.makeRotationY(avel[1] * dt)
+                rz = Matrix.makeRotationZ(avel[2] * dt)
+                rot = (rx @ ry @ rz)[:3, :3]
+                obj.transform[:3, :3] = rot @ obj.transform[:3, :3]
+                avel *= (0.996 if pos[1] > 0.04 else 0.982)
             d["vel"] = vel
             d["avel"] = avel
 
@@ -346,7 +368,7 @@ class Battlefield(Base):
         approach = smooth(progress(t, .2, 3.0))
         pass_by = smooth(progress(t, CLEAR_PATH_END, EXPLOSION))
         ref_x = (-2.4 + .56 * min(t, EXPLOSION)) if not self.exploded else (-2.4 + .56 * EXPLOSION)
-        drone_x = ref_x - 5.8 + 4.85 * approach + 10.5 * pass_by
+        drone_x = ref_x - 5.8 + 4.85 * approach + 7.0 * pass_by  # aproxima um pouco para a explosão ficar visível
         self.drone.setPosition((drone_x, 1.92 + .10 * sin(3 * t) + .27 * pass_by, -1.25))
         for rotor, direction in self.rotors:
             rotor.transform[:3, :3] = Matrix.makeRotationY(direction * 26 * t)[:3, :3]
@@ -354,12 +376,16 @@ class Battlefield(Base):
             if isinstance(item, Mesh):
                 item.visible = t < EXPLOSION
 
-        # Efeito do clarão da explosão
-        blast = progress(t, EXPLOSION, 8.55)
-        self.flash.visible = EXPLOSION <= t < 8.55
-        self.flash.setPosition((6.35, 1.9 + blast * .5, -.55))
-        size = .25 + 1.9 * sin(pi * blast)
-        self.flash.transform[:3, :3] = Matrix.makeRotationZ(blast * 1.3)[:3, :3] * size
+        # Efeito do clarão da explosão (a partir do drone)
+        blast = progress(t, EXPLOSION, 9.0)
+        self.flash.visible = EXPLOSION <= t < 9.0
+        exp_pos = getattr(self, 'explosion_pos', None)
+        if exp_pos is not None:
+            self.flash.setPosition((float(exp_pos[0]), float(exp_pos[1] + 0.25 + blast * 0.35), float(exp_pos[2])))
+        else:
+            self.flash.setPosition((drone_x, 1.92 + .10 * sin(3 * t) + .27 * pass_by, -1.25))
+        size = .35 + 3.2 * sin(pi * min(1.0, blast))
+        self.flash.transform[:3, :3] = Matrix.makeRotationZ(blast * 1.5)[:3, :3] * size
 
     def _clear_dynamic(self):
         # limpa destroços e remove objetos dinâmicos (besouro/drone/flash)
@@ -386,9 +412,17 @@ class Battlefield(Base):
         if hasattr(self, 'rng'):
             self.rng.seed(12345)
         self._step_cooldown = 0.0
+        self.explosion_pos = None
+        if getattr(self, 'crater', None) and self.crater.parent is not None:
+            try:
+                self.crater.parent.remove(self.crater)
+            except Exception:
+                pass
+        self.crater = None
         self.build_beetle()
         self.build_drone()
         self.flash = self.part(self.scene, (7, 2, -2), (1, 1, 1), "fire")
+        self.flash.casts_shadow = False
         self.time = 0.0
         self.animate()
 
@@ -403,9 +437,17 @@ class Battlefield(Base):
                 if hasattr(self, 'rng'):
                     self.rng.seed(12345)
                 self._step_cooldown = 0.0
+                self.explosion_pos = None
+                if getattr(self, 'crater', None) and self.crater.parent is not None:
+                    try:
+                        self.crater.parent.remove(self.crater)
+                    except Exception:
+                        pass
+                self.crater = None
                 self.build_beetle()
                 self.build_drone()
                 self.flash = self.part(self.scene, (7, 2, -2), (1, 1, 1), "fire")
+                self.flash.casts_shadow = False
             self.time = target
             self.animate()
             return
@@ -420,9 +462,17 @@ class Battlefield(Base):
             if hasattr(self, 'rng'):
                 self.rng.seed(12345)
             self._step_cooldown = 0.0
+            self.explosion_pos = None
+            if getattr(self, 'crater', None) and self.crater.parent is not None:
+                try:
+                    self.crater.parent.remove(self.crater)
+                except Exception:
+                    pass
+            self.crater = None
             self.build_beetle()
             self.build_drone()
             self.flash = self.part(self.scene, (7, 2, -2), (1, 1, 1), "fire")
+            self.flash.casts_shadow = False
             self.time = EXPLOSION
             self.animate()
         # simula destroços até o tempo alvo
